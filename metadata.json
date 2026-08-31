@@ -1,0 +1,6 @@
+{
+  "name": "Mirai",
+  "description": "A single Android app installed on both sibling phones for direct communication and a hint-only AI homework helper.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
