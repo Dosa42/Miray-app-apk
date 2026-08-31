@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavController
 import com.example.ui.MainViewModel
 
@@ -23,6 +24,10 @@ import com.example.ui.MainViewModel
 @Composable
 fun HomeScreen(navController: NavController, viewModel: MainViewModel) {
     val isAbiMode by viewModel.isAbiMode.collectAsState()
+    val isOAuthLoggedIn by viewModel.isOAuthLoggedIn.collectAsState()
+    val selectedModel by viewModel.selectedOpenAIModel.collectAsState()
+    val context = LocalContext.current
+    var showModelMenu by remember { mutableStateOf(false) }
     
     var tapCount by remember { mutableStateOf(0) }
 
@@ -67,6 +72,49 @@ fun HomeScreen(navController: NavController, viewModel: MainViewModel) {
                     icon = Icons.Default.List,
                     onClick = { navController.navigate("homework_list") }
                 )
+                
+                // OAuth Developer Settings for Abi
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Column(modifier = Modifier.padding(24.dp)) {
+                        Text("Developer Actions (OAuth)", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        if (!isOAuthLoggedIn) {
+                            Button(onClick = { viewModel.loginWithOpenAI(context) }) {
+                                Text("Login with OpenAI")
+                            }
+                        } else {
+                            Text("OpenAI Connected", color = MaterialTheme.colorScheme.onTertiaryContainer)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            Box {
+                                OutlinedButton(onClick = { showModelMenu = true }) {
+                                    Text("Model: $selectedModel")
+                                }
+                                DropdownMenu(expanded = showModelMenu, onDismissRequest = { showModelMenu = false }) {
+                                    viewModel.openAIModels.forEach { model ->
+                                        DropdownMenuItem(
+                                            text = { Text(model) },
+                                            onClick = { 
+                                                viewModel.selectModel(model)
+                                                showModelMenu = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = { viewModel.logoutOpenAI() }) {
+                                Text("Logout")
+                            }
+                        }
+                    }
+                }
             } else {
                 HomeCard(
                     title = "Homework Helper",

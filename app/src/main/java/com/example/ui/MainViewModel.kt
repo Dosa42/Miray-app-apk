@@ -16,6 +16,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.example.oauth.OAuthPkceManager
+import com.example.oauth.OpenAIOAuthConfig
+import com.example.oauth.SharedPrefsOAuthSessionStore
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val db = Room.databaseBuilder(
@@ -27,8 +30,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("mirai_prefs", Context.MODE_PRIVATE)
 
+    private val sessionStore = SharedPrefsOAuthSessionStore(application)
+    private val oauthManager = OAuthPkceManager(OpenAIOAuthConfig.config, sessionStore)
+
     private val _isAbiMode = MutableStateFlow(prefs.getBoolean("is_abi_mode", false))
     val isAbiMode: StateFlow<Boolean> = _isAbiMode.asStateFlow()
+
+    private val _isOAuthLoggedIn = MutableStateFlow(false)
+    val isOAuthLoggedIn: StateFlow<Boolean> = _isOAuthLoggedIn.asStateFlow()
+
+    val openAIModels = listOf(
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o1-preview",
+        "o1-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo"
+    )
+    private val _selectedOpenAIModel = MutableStateFlow(openAIModels[0])
+    val selectedOpenAIModel: StateFlow<String> = _selectedOpenAIModel.asStateFlow()
 
     val allMessages = repository.allMessages.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
@@ -37,6 +57,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val allSessions = repository.allHomeworkSessions.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
     )
+
+    init {
+        viewModelScope.launch {
+            _isOAuthLoggedIn.value = sessionStore.load() != null
+        }
+    }
+
+    fun loginWithOpenAI(context: Context) {
+        viewModelScope.launch {
+            val result = oauthManager.login(context)
+            if (result.isSuccess) {
+                _isOAuthLoggedIn.value = true
+            }
+        }
+    }
+
+    fun logoutOpenAI() {
+        viewModelScope.launch {
+            oauthManager.logout()
+            _isOAuthLoggedIn.value = false
+        }
+    }
+
+    fun selectModel(model: String) {
+        _selectedOpenAIModel.value = model
+    }
 
     fun toggleMode() {
         val newMode = !_isAbiMode.value
