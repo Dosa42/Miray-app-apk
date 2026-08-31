@@ -390,6 +390,7 @@ private fun JsonObject.errorDetail(): String {
             error.string("message")?.let { return it }
             error.string("code")?.let { return it }
         }
+        else -> Unit
     }
     objectValue("response")?.objectValue("error")?.let { responseError ->
         responseError.string("message")?.let { return it }
