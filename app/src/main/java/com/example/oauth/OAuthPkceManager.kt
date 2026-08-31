@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -12,12 +13,14 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 data class OAuthProviderConfig(
     val clientId: String,
@@ -27,11 +30,9 @@ data class OAuthProviderConfig(
     val callbackHost: String = "127.0.0.1",
     val callbackPort: Int,
     val callbackPath: String = "/oauth/callback",
-    val additionalAuthorizationParameters: Map<String, String> = emptyMap()
-) {
-    val redirectUri: String
-        get() = "http://$callbackHost:$callbackPort$callbackPath"
-}
+    val additionalAuthorizationParameters: Map<String, String> = emptyMap(),
+    val redirectUri: String = "http://$callbackHost:$callbackPort$callbackPath"
+)
 
 data class OAuthSession(
     val accessToken: String,
@@ -58,9 +59,11 @@ class StandardOAuthTokenDecoder : OAuthTokenDecoder {
         require(accessToken.isNotBlank()) { "Token response did not contain access_token." }
 
         val refreshToken = json.optString("refresh_token")
-            .ifBlank { previous?.refreshToken }
+            .takeIf { it.isNotBlank() }
+            ?: previous?.refreshToken
         val idToken = json.optString("id_token")
-            .ifBlank { previous?.idToken }
+            .takeIf { it.isNotBlank() }
+            ?: previous?.idToken
         val expiresIn = json.optLong("expires_in", 3600L)
 
         return OAuthSession(
@@ -76,11 +79,11 @@ class OAuthPkceManager(
     private val config: OAuthProviderConfig,
     private val sessionStore: OAuthSessionStore,
     private val tokenDecoder: OAuthTokenDecoder = StandardOAuthTokenDecoder(),
-    private val httpClient: OkHttpClient = OkHttpClient(),
+    private val httpClient: OkHttpClient = defaultOAuthHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
     suspend fun login(context: Context): Result<OAuthSession> = withContext(ioDispatcher) {
-        runCatching {
+        try {
             val verifier = createCodeVerifier()
             val state = UUID.randomUUID().toString()
             val authorizationUri = buildAuthorizationUri(verifier, state)
@@ -98,24 +101,36 @@ class OAuthPkceManager(
                 receiveAuthorizationCode(server, state)
             }
 
-            exchangeAuthorizationCode(authorizationCode, verifier).also {
-                sessionStore.save(it)
-            }
+            val session = exchangeAuthorizationCode(authorizationCode, verifier)
+            sessionStore.save(session)
+            Result.success(session)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
     }
 
     suspend fun validSession(refreshWindowSeconds: Long = 300L): Result<OAuthSession> =
         withContext(ioDispatcher) {
-            runCatching {
+            try {
                 val session = requireNotNull(sessionStore.load()) {
                     "No OAuth session is stored."
                 }
                 val now = System.currentTimeMillis() / 1000L
-                if (session.expiresAtEpochSeconds > now + refreshWindowSeconds) {
+                val validSession = if (
+                    session.expiresAtEpochSeconds == 0L ||
+                    session.expiresAtEpochSeconds > now + refreshWindowSeconds
+                ) {
                     session
                 } else {
                     refresh(session).also { sessionStore.save(it) }
                 }
+                Result.success(validSession)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Result.failure(error)
             }
         }
 
@@ -218,11 +233,35 @@ class OAuthPkceManager(
 
         httpClient.newCall(request).execute().use { response ->
             val rawBody = response.body?.string().orEmpty()
-            check(response.isSuccessful) {
-                "OAuth token request failed with HTTP ${response.code}."
+            if (!response.isSuccessful) {
+                val detail = tokenErrorDetail(rawBody)
+                throw IOException(
+                    buildString {
+                        append("OAuth token request failed with HTTP ${response.code}")
+                        if (detail.isNotBlank()) append(": $detail")
+                        append('.')
+                    }
+                )
             }
             return tokenDecoder.decode(rawBody, previous)
         }
+    }
+
+    private fun tokenErrorDetail(rawBody: String): String {
+        if (rawBody.isBlank()) return ""
+
+        return runCatching {
+            val json = JSONObject(rawBody)
+            json.optString("error_description").takeIf { it.isNotBlank() }
+                ?: when (val error = json.opt("error")) {
+                    is JSONObject -> error.optString("message").takeIf { it.isNotBlank() }
+                        ?: error.optString("code").takeIf { it.isNotBlank() }
+                        ?: error.toString()
+                    is String -> error.takeIf { it.isNotBlank() }
+                    else -> null
+                }
+                ?: json.optString("message").takeIf { it.isNotBlank() }
+        }.getOrNull().orEmpty().ifBlank { rawBody.trim() }
     }
 
     private fun createCodeVerifier(): String {
@@ -240,5 +279,13 @@ class OAuthPkceManager(
             digest,
             Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
         )
+    }
+
+    companion object {
+        private fun defaultOAuthHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
     }
 }

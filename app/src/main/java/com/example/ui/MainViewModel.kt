@@ -4,21 +4,31 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.Room
+import com.example.api.CodexAuthenticationException
+import com.example.api.CodexHttpException
+import com.example.api.CodexResponsesClient
 import com.example.data.AppDatabase
 import com.example.data.HomeworkMessage
 import com.example.data.HomeworkSession
 import com.example.data.Message
 import com.example.data.MiraiRepository
-import androidx.room.Room
+import com.example.oauth.OAuthSession
+import com.example.oauth.OpenAIConnectionState
+import com.example.oauth.OpenAIOAuthConfig
+import com.example.oauth.OpenAIProviderDefaults
+import com.example.oauth.SharedPrefsOpenAIProviderStore
+import com.example.oauth.chatGptAccountId
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import com.example.oauth.OAuthPkceManager
-import com.example.oauth.OpenAIOAuthConfig
-import com.example.oauth.SharedPrefsOAuthSessionStore
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val db = Room.databaseBuilder(
@@ -30,25 +40,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("mirai_prefs", Context.MODE_PRIVATE)
 
-    private val sessionStore = SharedPrefsOAuthSessionStore(application)
-    private val oauthManager = OAuthPkceManager(OpenAIOAuthConfig.config, sessionStore)
+    private val openAIProviderStore = SharedPrefsOpenAIProviderStore(application)
+    private val oauthManager = OpenAIOAuthConfig.createManager(openAIProviderStore)
+    private val codexResponsesClient = CodexResponsesClient(oauthManager, openAIProviderStore)
 
     private val _isAbiMode = MutableStateFlow(prefs.getBoolean("is_abi_mode", false))
     val isAbiMode: StateFlow<Boolean> = _isAbiMode.asStateFlow()
 
-    private val _isOAuthLoggedIn = MutableStateFlow(false)
-    val isOAuthLoggedIn: StateFlow<Boolean> = _isOAuthLoggedIn.asStateFlow()
+    private val _openAIConnectionState =
+        MutableStateFlow<OpenAIConnectionState>(OpenAIConnectionState.Refreshing)
+    val openAIConnectionState: StateFlow<OpenAIConnectionState> =
+        _openAIConnectionState.asStateFlow()
 
-    val openAIModels = listOf(
-        "gpt-4o",
-        "gpt-4o-mini",
-        "o1-preview",
-        "o1-mini",
-        "gpt-4-turbo",
-        "gpt-3.5-turbo"
-    )
-    private val _selectedOpenAIModel = MutableStateFlow(openAIModels[0])
+    val isOAuthLoggedIn: StateFlow<Boolean> = openAIConnectionState
+        .map { it is OpenAIConnectionState.Connected }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val openAIModels: List<String> = OpenAIProviderDefaults.MODELS
+    private val _selectedOpenAIModel = MutableStateFlow(OpenAIProviderDefaults.DEFAULT_MODEL)
     val selectedOpenAIModel: StateFlow<String> = _selectedOpenAIModel.asStateFlow()
+
+    private val _openAIResponseText = MutableStateFlow("")
+    val openAIResponseText: StateFlow<String> = _openAIResponseText.asStateFlow()
+
+    private val _isOpenAIRequestRunning = MutableStateFlow(false)
+    val isOpenAIRequestRunning: StateFlow<Boolean> = _isOpenAIRequestRunning.asStateFlow()
+
+    private val _openAIErrorMessage = MutableStateFlow<String?>(null)
+    val openAIErrorMessage: StateFlow<String?> = _openAIErrorMessage.asStateFlow()
+
+    private var modelPersistenceJob: Job? = null
+    private var openAIRequestJob: Job? = null
+    private var openAILogoutJob: Job? = null
+    private var openAIRequestGeneration = 0L
 
     val allMessages = repository.allMessages.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
@@ -60,28 +84,145 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            _isOAuthLoggedIn.value = sessionStore.load() != null
+            restoreOpenAIProvider()
         }
     }
 
     fun loginWithOpenAI(context: Context) {
+        if (
+            _openAIConnectionState.value is OpenAIConnectionState.Authorizing ||
+            openAILogoutJob?.isActive == true
+        ) return
+
+        _openAIErrorMessage.value = null
+        _openAIConnectionState.value = OpenAIConnectionState.Authorizing
         viewModelScope.launch {
-            val result = oauthManager.login(context)
-            if (result.isSuccess) {
-                _isOAuthLoggedIn.value = true
-            }
+            oauthManager.login(context).fold(
+                onSuccess = { session ->
+                    updateConnectedState(
+                        session,
+                        "OpenAI sign-in succeeded, but the account ID was missing. Log out and try again."
+                    )
+                },
+                onFailure = { error ->
+                    _openAIConnectionState.value = OpenAIConnectionState.Error(
+                        actionableError("OpenAI sign-in failed.", error)
+                    )
+                }
+            )
         }
     }
 
     fun logoutOpenAI() {
-        viewModelScope.launch {
-            oauthManager.logout()
-            _isOAuthLoggedIn.value = false
+        if (openAILogoutJob?.isActive == true) return
+
+        openAIRequestGeneration++
+        openAIRequestJob?.cancel()
+        openAIRequestJob = null
+        _openAIResponseText.value = ""
+        _isOpenAIRequestRunning.value = false
+        _openAIErrorMessage.value = null
+
+        openAILogoutJob = viewModelScope.launch {
+            try {
+                runCatching { oauthManager.logout() }.fold(
+                    onSuccess = {
+                        _openAIConnectionState.value = OpenAIConnectionState.LoggedOut
+                    },
+                    onFailure = { error ->
+                        if (error is CancellationException) throw error
+                        _openAIConnectionState.value = OpenAIConnectionState.Error(
+                            actionableError("OpenAI logout failed. Try again.", error)
+                        )
+                    }
+                )
+            } finally {
+                openAILogoutJob = null
+            }
         }
     }
 
     fun selectModel(model: String) {
+        if (model !in openAIModels || model == _selectedOpenAIModel.value) return
+
         _selectedOpenAIModel.value = model
+        _openAIErrorMessage.value = null
+        modelPersistenceJob?.cancel()
+        modelPersistenceJob = viewModelScope.launch {
+            runCatching {
+                val settings = openAIProviderStore.loadSettings()
+                openAIProviderStore.saveSettings(settings.copy(model = model))
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                _openAIErrorMessage.value = actionableError(
+                    "The OpenAI model could not be saved.",
+                    error
+                )
+            }
+        }
+    }
+
+    fun sendOpenAIResponse(prompt: String) {
+        val requestPrompt = prompt.trim()
+        if (
+            requestPrompt.isBlank() ||
+            _isOpenAIRequestRunning.value ||
+            openAILogoutJob?.isActive == true
+        ) return
+
+        if (_openAIConnectionState.value !is OpenAIConnectionState.Connected) {
+            _openAIErrorMessage.value =
+                "Connect an OpenAI account before sending a request."
+            return
+        }
+
+        val requestModel = _selectedOpenAIModel.value
+        val requestGeneration = ++openAIRequestGeneration
+        _openAIResponseText.value = ""
+        _openAIErrorMessage.value = null
+        _isOpenAIRequestRunning.value = true
+
+        openAIRequestJob = viewModelScope.launch {
+            try {
+                val result = codexResponsesClient.createResponse(
+                    prompt = requestPrompt,
+                    model = requestModel,
+                    onTextDelta = { delta ->
+                        if (
+                            requestGeneration == openAIRequestGeneration &&
+                            delta.isNotEmpty()
+                        ) {
+                            _openAIResponseText.update { currentText -> currentText + delta }
+                        }
+                    }
+                )
+
+                if (requestGeneration != openAIRequestGeneration) return@launch
+
+                result.fold(
+                    onSuccess = { response ->
+                        if (response.text.isNotEmpty() || _openAIResponseText.value.isEmpty()) {
+                            _openAIResponseText.value = response.text
+                        }
+                    },
+                    onFailure = { error ->
+                        val message = actionableError(
+                            "OpenAI could not complete the request. Check the connection and try again.",
+                            error
+                        )
+                        _openAIErrorMessage.value = message
+                        if (error.isAuthenticationFailure()) {
+                            _openAIConnectionState.value = OpenAIConnectionState.Error(message)
+                        }
+                    }
+                )
+            } finally {
+                if (requestGeneration == openAIRequestGeneration) {
+                    _isOpenAIRequestRunning.value = false
+                    openAIRequestJob = null
+                }
+            }
+        }
     }
 
     fun toggleMode() {
@@ -116,4 +257,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.insertHomeworkMessage(HomeworkMessage(sessionId = sessionId, sender = sender, text = text))
         }
     }
+
+    private suspend fun restoreOpenAIProvider() {
+        runCatching { openAIProviderStore.loadSettings() }
+            .onSuccess { settings ->
+                _selectedOpenAIModel.value =
+                    settings.model.ifBlank { OpenAIProviderDefaults.DEFAULT_MODEL }
+            }
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                _openAIErrorMessage.value = actionableError(
+                    "The saved OpenAI model setting could not be loaded.",
+                    error
+                )
+            }
+
+        _openAIConnectionState.value = OpenAIConnectionState.Refreshing
+        oauthManager.validSession().fold(
+            onSuccess = { session ->
+                updateConnectedState(
+                    session,
+                    "The saved OpenAI session has no account ID. Log in again."
+                )
+            },
+            onFailure = { error ->
+                _openAIConnectionState.value = if (error.indicatesMissingSession()) {
+                    OpenAIConnectionState.LoggedOut
+                } else {
+                    OpenAIConnectionState.Error(
+                        actionableError(
+                            "The saved OpenAI session could not be restored or refreshed. Log in again.",
+                            error
+                        )
+                    )
+                }
+            }
+        )
+    }
+
+    private fun updateConnectedState(session: OAuthSession, missingAccountMessage: String) {
+        val accountId = session.chatGptAccountId.orEmpty().trim()
+        _openAIConnectionState.value = if (accountId.isNotEmpty()) {
+            OpenAIConnectionState.Connected(accountId)
+        } else {
+            OpenAIConnectionState.Error(missingAccountMessage)
+        }
+    }
+
+    private fun Throwable.indicatesMissingSession(): Boolean {
+        val detail = message.orEmpty()
+        return detail.contains("no oauth session", ignoreCase = true) ||
+            detail.contains("no stored session", ignoreCase = true) ||
+            detail.contains("no session is stored", ignoreCase = true)
+    }
+
+    private fun actionableError(prefix: String, error: Throwable): String {
+        val detail = error.message?.trim().orEmpty()
+        return if (detail.isEmpty()) prefix else "$prefix $detail"
+    }
+
+    private fun Throwable.isAuthenticationFailure(): Boolean =
+        this is CodexAuthenticationException ||
+            (this is CodexHttpException && statusCode in setOf(401, 403))
 }
