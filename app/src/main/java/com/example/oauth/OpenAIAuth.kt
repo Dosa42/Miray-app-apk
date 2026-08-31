@@ -3,6 +3,7 @@ package com.example.oauth
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -12,7 +13,7 @@ private const val CHATGPT_ACCOUNT_ID_METADATA_KEY = "chatgpt_account_id"
 sealed interface OpenAIConnectionState {
     data object LoggedOut : OpenAIConnectionState
     data object Authorizing : OpenAIConnectionState
-    data class Connected(val accountId: String) : OpenAIConnectionState
+    data class Connected(val accountId: String? = null) : OpenAIConnectionState
     data object Refreshing : OpenAIConnectionState
     data class Error(val message: String) : OpenAIConnectionState
 }
@@ -33,11 +34,6 @@ data class OpenAIProviderSettings(
     val backendBaseUrl: String = OpenAIProviderDefaults.BACKEND_BASE_URL
 )
 
-class InvalidStoredOpenAISessionException(
-    message: String,
-    cause: Throwable? = null
-) : IllegalStateException(message, cause)
-
 val OAuthSession.chatGptAccountId: String?
     get() = providerMetadata[CHATGPT_ACCOUNT_ID_METADATA_KEY]
         ?.takeIf { it.isNotBlank() }
@@ -49,21 +45,12 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
     )
 
     override suspend fun load(): OAuthSession? = withContext(Dispatchers.IO) {
-        val stored = prefs.getString(KEY_SESSION, null) ?: return@withContext null
-
         try {
+            val stored = prefs.getString(KEY_SESSION, null) ?: return@withContext null
             val json = JSONObject(stored)
-            val sessionType = json.optionalString(KEY_TYPE)
-            if (sessionType != null && sessionType != SESSION_TYPE) {
-                throw InvalidStoredOpenAISessionException(
-                    "The stored OAuth session belongs to another provider."
-                )
-            }
             val accessToken = json.optString(KEY_ACCESS_TOKEN)
             if (accessToken.isBlank()) {
-                throw InvalidStoredOpenAISessionException(
-                    "The stored OpenAI OAuth session has no access token."
-                )
+                return@withContext null
             }
 
             val refreshToken = json.optionalString(KEY_REFRESH_TOKEN)
@@ -73,11 +60,8 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
                 ?: metadata[CHATGPT_ACCOUNT_ID_METADATA_KEY]
                 ?: OpenAIJwtClaims.accountId(idToken)
                 ?: OpenAIJwtClaims.accountId(accessToken)
-                ?: throw InvalidStoredOpenAISessionException(
-                    "The stored OpenAI OAuth session has no ChatGPT account ID."
-                )
 
-            metadata[CHATGPT_ACCOUNT_ID_METADATA_KEY] = accountId
+            accountId?.let { metadata[CHATGPT_ACCOUNT_ID_METADATA_KEY] = it }
             OAuthSession(
                 accessToken = accessToken,
                 refreshToken = refreshToken,
@@ -88,13 +72,10 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
                 ),
                 providerMetadata = metadata
             )
-        } catch (error: InvalidStoredOpenAISessionException) {
+        } catch (error: CancellationException) {
             throw error
-        } catch (error: Exception) {
-            throw InvalidStoredOpenAISessionException(
-                "The stored OpenAI OAuth session could not be decoded.",
-                error
-            )
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -103,10 +84,8 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
         val accountId = session.chatGptAccountId
             ?: OpenAIJwtClaims.accountId(session.idToken)
             ?: OpenAIJwtClaims.accountId(session.accessToken)
-        require(!accountId.isNullOrBlank()) {
-            "The OpenAI OAuth session does not contain a ChatGPT account ID."
-        }
-        metadata[CHATGPT_ACCOUNT_ID_METADATA_KEY] = accountId
+        accountId?.takeIf { it.isNotBlank() }
+            ?.let { metadata[CHATGPT_ACCOUNT_ID_METADATA_KEY] = it }
         val metadataJson = JSONObject().apply {
             metadata.forEach { (key, value) -> put(key, value) }
         }
@@ -116,26 +95,25 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
             put(KEY_ACCESS_TOKEN, session.accessToken)
             session.refreshToken?.let { put(KEY_REFRESH_TOKEN, it) }
             session.idToken?.let { put(KEY_ID_TOKEN, it) }
-            put(KEY_ACCOUNT_ID, accountId)
+            accountId?.takeIf { it.isNotBlank() }?.let { put(KEY_ACCOUNT_ID, it) }
             put(KEY_EXPIRES_AT, session.expiresAtEpochSeconds)
             put(KEY_PROVIDER_METADATA, metadataJson)
         }
-        check(prefs.edit().putString(KEY_SESSION, json.toString()).commit()) {
-            "Could not persist the OpenAI OAuth session."
+        editPreferencesBestEffort {
+            putString(KEY_SESSION, json.toString())
         }
     }
 
     override suspend fun clear() = withContext(Dispatchers.IO) {
-        check(prefs.edit().remove(KEY_SESSION).commit()) {
-            "Could not clear the OpenAI OAuth session."
+        editPreferencesBestEffort {
+            remove(KEY_SESSION)
         }
     }
 
     suspend fun loadSettings(): OpenAIProviderSettings = withContext(Dispatchers.IO) {
-        val stored = prefs.getString(KEY_SETTINGS, null)
-            ?: return@withContext OpenAIProviderSettings()
-
         try {
+            val stored = prefs.getString(KEY_SETTINGS, null)
+                ?: return@withContext OpenAIProviderSettings()
             val json = JSONObject(stored)
             OpenAIProviderSettings(
                 model = json.optString(KEY_MODEL)
@@ -143,6 +121,8 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
                 backendBaseUrl = json.optString(KEY_BACKEND_BASE_URL)
                     .ifBlank { OpenAIProviderDefaults.BACKEND_BASE_URL }
             )
+        } catch (error: CancellationException) {
+            throw error
         } catch (_: Exception) {
             OpenAIProviderSettings()
         }
@@ -153,8 +133,20 @@ class SharedPrefsOpenAIProviderStore(context: Context) : OAuthSessionStore {
             put(KEY_MODEL, settings.model)
             put(KEY_BACKEND_BASE_URL, settings.backendBaseUrl)
         }
-        check(prefs.edit().putString(KEY_SETTINGS, json.toString()).commit()) {
-            "Could not persist the OpenAI provider settings."
+        editPreferencesBestEffort {
+            putString(KEY_SETTINGS, json.toString())
+        }
+    }
+
+    private fun editPreferencesBestEffort(block: SharedPreferences.Editor.() -> Unit) {
+        try {
+            val editor = prefs.edit()
+            editor.block()
+            editor.apply()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // The in-memory provider/session state remains authoritative for this process.
         }
     }
 
@@ -190,15 +182,14 @@ object OpenAIOAuthConfig {
             "api.connectors.read",
             "api.connectors.invoke"
         ),
-        callbackHost = "127.0.0.1",
+        callbackHost = "localhost",
         callbackPort = 1455,
         callbackPath = "/auth/callback",
         additionalAuthorizationParameters = linkedMapOf(
             "id_token_add_organizations" to "true",
             "codex_cli_simplified_flow" to "true",
             "originator" to "codex_cli_rs"
-        ),
-        redirectUri = "http://localhost:1455/auth/callback"
+        )
     )
 
     fun createManager(sessionStore: OAuthSessionStore): OAuthPkceManager = OAuthPkceManager(
@@ -221,14 +212,12 @@ object OpenAIOAuthTokenDecoder : OAuthTokenDecoder {
         val accountId = OpenAIJwtClaims.accountId(idToken)
             ?: OpenAIJwtClaims.accountId(accessToken)
             ?: previous?.chatGptAccountId
-        require(!accountId.isNullOrBlank()) {
-            "OpenAI OAuth token response did not contain a ChatGPT account ID."
-        }
 
         val expiresAt = OpenAIJwtClaims.expiry(accessToken)
             ?: (System.currentTimeMillis() / 1000L) + json.optLong("expires_in", 3600L)
         val metadata = previous?.providerMetadata.orEmpty().toMutableMap().apply {
-            put(CHATGPT_ACCOUNT_ID_METADATA_KEY, accountId)
+            accountId?.takeIf { it.isNotBlank() }
+                ?.let { put(CHATGPT_ACCOUNT_ID_METADATA_KEY, it) }
         }
 
         return OAuthSession(

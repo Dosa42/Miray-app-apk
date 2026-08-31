@@ -127,8 +127,10 @@ fun HomeScreen(navController: NavController, viewModel: MainViewModel) {
                             }
 
                             is OpenAIConnectionState.Connected -> {
+                                val accountId = state.accountId?.trim()?.takeIf { it.isNotEmpty() }
                                 Text(
-                                    text = "Connected account: ${state.accountId}",
+                                    text = accountId?.let { "Connected account: $it" }
+                                        ?: "OpenAI is connected.",
                                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                                     style = MaterialTheme.typography.bodyMedium
                                 )

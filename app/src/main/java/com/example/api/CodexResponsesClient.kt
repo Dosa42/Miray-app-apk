@@ -93,12 +93,13 @@ class CodexResponsesClient(
                 )
             )
         }
-        val accountId = session.chatGptAccountId
+        val accessToken = session.accessToken.trim().takeIf { it.isNotEmpty() }
             ?: return Result.failure(
                 CodexAuthenticationException(
-                    "The ChatGPT OAuth session does not contain chatgpt_account_id."
+                    "The ChatGPT OAuth session does not contain an access token."
                 )
             )
+        val accountId = session.chatGptAccountId?.trim()?.takeIf { it.isNotEmpty() }
 
         return try {
             val settings = providerStore.loadSettings()
@@ -108,7 +109,7 @@ class CodexResponsesClient(
                 ?: throw CodexResponsesException("The Codex backend base URL is empty.")
             val request = buildRequest(
                 endpoint = endpoint,
-                accessToken = session.accessToken,
+                accessToken = accessToken,
                 accountId = accountId,
                 prompt = prompt,
                 model = model
@@ -132,7 +133,7 @@ class CodexResponsesClient(
     private fun buildRequest(
         endpoint: String,
         accessToken: String,
-        accountId: String,
+        accountId: String?,
         prompt: String,
         model: String
     ): Request {
@@ -168,16 +169,17 @@ class CodexResponsesClient(
             put("include", buildJsonArray {})
         }
 
-        return Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(endpoint)
             .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
             .header("Authorization", "Bearer $accessToken")
-            .header("ChatGPT-Account-ID", accountId)
             .header("originator", ORIGINATOR)
             .header("version", CLIENT_VERSION)
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json")
-            .build()
+
+        accountId?.let { requestBuilder.header("ChatGPT-Account-ID", it) }
+        return requestBuilder.build()
     }
 
     private suspend fun executeStreaming(
@@ -216,7 +218,7 @@ class CodexResponsesClient(
                                 ?: throw CodexSseException(
                                     "Codex Responses returned an empty SSE body."
                                 )
-                            val result = parseSse(
+                            val result = parseCodexResponsesSse(
                                 source = body.source(),
                                 isActive = { continuation.isActive },
                                 onTextDelta = onTextDelta
@@ -242,131 +244,124 @@ class CodexResponsesClient(
         )
     }
 
-    private fun parseSse(
-        source: BufferedSource,
-        isActive: () -> Boolean,
-        onTextDelta: (String) -> Unit
-    ): CodexResponseResult {
-        val state = StreamState()
-        var eventName: String? = null
-        val dataLines = mutableListOf<String>()
-
-        fun dispatchEvent() {
-            if (dataLines.isEmpty()) {
-                eventName = null
-                return
-            }
-            if (!isActive()) throw CancellationException("Codex Responses call was cancelled.")
-            state.accept(
-                eventName = eventName,
-                data = dataLines.joinToString("\n"),
-                onTextDelta = onTextDelta
-            )
-            eventName = null
-            dataLines.clear()
-        }
-
-        while (true) {
-            if (!isActive()) throw CancellationException("Codex Responses call was cancelled.")
-            val line = source.readUtf8Line() ?: break
-            when {
-                line.isEmpty() -> dispatchEvent()
-                line.startsWith(":") -> Unit
-                else -> {
-                    val separator = line.indexOf(':')
-                    val field = if (separator >= 0) line.substring(0, separator) else line
-                    val rawValue = if (separator >= 0) line.substring(separator + 1) else ""
-                    val value = rawValue.removePrefix(" ")
-                    when (field) {
-                        "event" -> eventName = value
-                        "data" -> dataLines += value
-                    }
-                }
-            }
-        }
-        dispatchEvent()
-
-        if (!state.completed) {
-            throw CodexSseException(
-                "Codex Responses stream ended before response.completed."
-            )
-        }
-        return CodexResponseResult(
-            responseId = state.responseId,
-            text = state.text.toString()
-        )
-    }
-
-    private class StreamState {
-        val text = StringBuilder()
-        var responseId: String? = null
-        var completed: Boolean = false
-
-        fun accept(
-            eventName: String?,
-            data: String,
-            onTextDelta: (String) -> Unit
-        ) {
-            if (data == "[DONE]") return
-
-            val payload = try {
-                Json.parseToJsonElement(data) as? JsonObject
-                    ?: throw CodexSseException(
-                        "Codex SSE event did not contain a JSON object."
-                    )
-            } catch (error: CodexResponsesException) {
-                throw error
-            } catch (error: Throwable) {
-                if (eventName == "error") {
-                    throw CodexProviderException("error", data)
-                }
-                throw CodexSseException(
-                    "Could not parse Codex SSE event " + (eventName ?: "<unnamed>") + ".",
-                    error
-                )
-            }
-
-            val eventType = if (eventName == "error") {
-                "error"
-            } else {
-                payload.string("type") ?: eventName ?: "<unnamed>"
-            }
-            responseId = payload.string("response_id")
-                ?: payload.objectValue("response")?.string("id")
-                ?: responseId
-
-            when (eventType) {
-                "response.output_text.delta" -> {
-                    val delta = payload.string("delta")
-                        ?: throw CodexSseException(
-                            "Codex response.output_text.delta event contained no delta."
-                        )
-                    text.append(delta)
-                    try {
-                        onTextDelta(delta)
-                    } catch (error: Throwable) {
-                        throw CodexSseException(
-                            "The Codex text-delta consumer failed.",
-                            error
-                        )
-                    }
-                }
-
-                "response.completed" -> completed = true
-                "error", "response.failed", "response.incomplete" -> {
-                    throw CodexProviderException(
-                        eventType = eventType,
-                        detail = payload.errorDetail()
-                    )
-                }
-            }
-        }
-    }
-
     private companion object {
         const val ORIGINATOR = "codex_cli_rs"
         const val CLIENT_VERSION = "Miray-Android/1.0"
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
+    }
+}
+
+private fun parseCodexResponsesSse(
+    source: BufferedSource,
+    isActive: () -> Boolean,
+    onTextDelta: (String) -> Unit
+): CodexResponseResult {
+    val state = CodexStreamState()
+    var eventName: String? = null
+    val dataLines = mutableListOf<String>()
+
+    fun dispatchEvent() {
+        if (dataLines.isEmpty()) {
+            eventName = null
+            return
+        }
+        if (!isActive()) throw CancellationException("Codex Responses call was cancelled.")
+        state.accept(
+            eventName = eventName,
+            data = dataLines.joinToString("\n"),
+            onTextDelta = onTextDelta
+        )
+        eventName = null
+        dataLines.clear()
+    }
+
+    while (true) {
+        if (!isActive()) throw CancellationException("Codex Responses call was cancelled.")
+        val line = source.readUtf8Line() ?: break
+        when {
+            line.isEmpty() -> dispatchEvent()
+            line.startsWith(":") -> Unit
+            else -> {
+                val separator = line.indexOf(':')
+                val field = if (separator >= 0) line.substring(0, separator) else line
+                val rawValue = if (separator >= 0) line.substring(separator + 1) else ""
+                val value = rawValue.removePrefix(" ")
+                when (field) {
+                    "event" -> eventName = value
+                    "data" -> dataLines += value
+                }
+            }
+        }
+    }
+    dispatchEvent()
+
+    return CodexResponseResult(
+        responseId = state.responseId,
+        text = state.text.toString()
+    )
+}
+
+private class CodexStreamState {
+    val text = StringBuilder()
+    var responseId: String? = null
+
+    fun accept(
+        eventName: String?,
+        data: String,
+        onTextDelta: (String) -> Unit
+    ) {
+        if (data == "[DONE]") return
+
+        val payload = try {
+            Json.parseToJsonElement(data) as? JsonObject
+                ?: throw CodexSseException(
+                    "Codex SSE event did not contain a JSON object."
+                )
+        } catch (error: CodexResponsesException) {
+            throw error
+        } catch (error: Throwable) {
+            if (eventName == "error") {
+                throw CodexProviderException("error", data)
+            }
+            throw CodexSseException(
+                "Could not parse Codex SSE event " + (eventName ?: "<unnamed>") + ".",
+                error
+            )
+        }
+
+        val eventType = if (eventName == "error") {
+            "error"
+        } else {
+            payload.string("type") ?: eventName ?: "<unnamed>"
+        }
+        responseId = payload.string("response_id")
+            ?: payload.objectValue("response")?.string("id")
+            ?: responseId
+
+        when (eventType) {
+            "response.output_text.delta" -> {
+                val delta = payload.string("delta")
+                    ?: throw CodexSseException(
+                        "Codex response.output_text.delta event contained no delta."
+                    )
+                text.append(delta)
+                try {
+                    onTextDelta(delta)
+                } catch (error: Throwable) {
+                    throw CodexSseException(
+                        "The Codex text-delta consumer failed.",
+                        error
+                    )
+                }
+            }
+
+            "error", "response.failed", "response.incomplete" -> {
+                throw CodexProviderException(
+                    eventType = eventType,
+                    detail = payload.errorDetail()
+                )
+            }
+        }
     }
 }
 

@@ -6,7 +6,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import com.example.api.CodexAuthenticationException
-import com.example.api.CodexHttpException
 import com.example.api.CodexResponsesClient
 import com.example.data.AppDatabase
 import com.example.data.HomeworkMessage
@@ -101,7 +100,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onSuccess = { session ->
                     updateConnectedState(
                         session,
-                        "OpenAI sign-in succeeded, but the account ID was missing. Log out and try again."
+                        "OpenAI sign-in succeeded, but no access token was returned. Log out and try again."
                     )
                 },
                 onFailure = { error ->
@@ -170,12 +169,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openAILogoutJob?.isActive == true
         ) return
 
-        if (_openAIConnectionState.value !is OpenAIConnectionState.Connected) {
-            _openAIErrorMessage.value =
-                "Connect an OpenAI account before sending a request."
-            return
-        }
-
         val requestModel = _selectedOpenAIModel.value
         val requestGeneration = ++openAIRequestGeneration
         _openAIResponseText.value = ""
@@ -211,7 +204,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             error
                         )
                         _openAIErrorMessage.value = message
-                        if (error.isAuthenticationFailure()) {
+                        if (error is CodexAuthenticationException) {
                             _openAIConnectionState.value = OpenAIConnectionState.Error(message)
                         }
                     }
@@ -277,7 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             onSuccess = { session ->
                 updateConnectedState(
                     session,
-                    "The saved OpenAI session has no account ID. Log in again."
+                    "The saved OpenAI session has no access token. Log in again."
                 )
             },
             onFailure = { error ->
@@ -295,12 +288,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    private fun updateConnectedState(session: OAuthSession, missingAccountMessage: String) {
-        val accountId = session.chatGptAccountId.orEmpty().trim()
-        _openAIConnectionState.value = if (accountId.isNotEmpty()) {
+    private fun updateConnectedState(session: OAuthSession, missingAccessTokenMessage: String) {
+        val accountId = session.chatGptAccountId?.trim()?.takeIf { it.isNotEmpty() }
+        _openAIConnectionState.value = if (session.accessToken.isNotBlank()) {
             OpenAIConnectionState.Connected(accountId)
         } else {
-            OpenAIConnectionState.Error(missingAccountMessage)
+            OpenAIConnectionState.Error(missingAccessTokenMessage)
         }
     }
 
@@ -315,8 +308,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val detail = error.message?.trim().orEmpty()
         return if (detail.isEmpty()) prefix else "$prefix $detail"
     }
-
-    private fun Throwable.isAuthenticationFailure(): Boolean =
-        this is CodexAuthenticationException ||
-            (this is CodexHttpException && statusCode in setOf(401, 403))
 }

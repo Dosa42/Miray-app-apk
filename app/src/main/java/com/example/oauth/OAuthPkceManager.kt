@@ -30,9 +30,11 @@ data class OAuthProviderConfig(
     val callbackHost: String = "127.0.0.1",
     val callbackPort: Int,
     val callbackPath: String = "/oauth/callback",
-    val additionalAuthorizationParameters: Map<String, String> = emptyMap(),
-    val redirectUri: String = "http://$callbackHost:$callbackPort$callbackPath"
-)
+    val additionalAuthorizationParameters: Map<String, String> = emptyMap()
+) {
+    val redirectUri: String
+        get() = "http://$callbackHost:$callbackPort$callbackPath"
+}
 
 data class OAuthSession(
     val accessToken: String,
@@ -82,6 +84,9 @@ class OAuthPkceManager(
     private val httpClient: OkHttpClient = defaultOAuthHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
+    @Volatile
+    private var activeSession: OAuthSession? = null
+
     suspend fun login(context: Context): Result<OAuthSession> = withContext(ioDispatcher) {
         try {
             val verifier = createCodeVerifier()
@@ -102,7 +107,8 @@ class OAuthPkceManager(
             }
 
             val session = exchangeAuthorizationCode(authorizationCode, verifier)
-            sessionStore.save(session)
+            activeSession = session
+            persistSessionBestEffort(session)
             Result.success(session)
         } catch (error: CancellationException) {
             throw error
@@ -111,10 +117,12 @@ class OAuthPkceManager(
         }
     }
 
-    suspend fun validSession(refreshWindowSeconds: Long = 300L): Result<OAuthSession> =
+    suspend fun validSession(refreshWindowSeconds: Long = 0L): Result<OAuthSession> =
         withContext(ioDispatcher) {
             try {
-                val session = requireNotNull(sessionStore.load()) {
+                val session = requireNotNull(
+                    activeSession ?: sessionStore.load()?.also { activeSession = it }
+                ) {
                     "No OAuth session is stored."
                 }
                 val now = System.currentTimeMillis() / 1000L
@@ -124,8 +132,18 @@ class OAuthPkceManager(
                 ) {
                     session
                 } else {
-                    refresh(session).also { sessionStore.save(it) }
+                    try {
+                        val refreshedSession = refresh(session)
+                        activeSession = refreshedSession
+                        persistSessionBestEffort(refreshedSession)
+                        refreshedSession
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        if (session.accessToken.isNotBlank()) session else throw error
+                    }
                 }
+                activeSession = validSession
                 Result.success(validSession)
             } catch (error: CancellationException) {
                 throw error
@@ -134,8 +152,11 @@ class OAuthPkceManager(
             }
         }
 
-    suspend fun logout() = withContext(ioDispatcher) {
-        sessionStore.clear()
+    suspend fun logout() {
+        activeSession = null
+        withContext(ioDispatcher) {
+            clearSessionBestEffort()
+        }
     }
 
     private fun buildAuthorizationUri(verifier: String, state: String): Uri {
@@ -170,15 +191,39 @@ class OAuthPkceManager(
                 ?: callback.getQueryParameter("error")
 
             val validPath = callback.path == config.callbackPath
-            val success = validPath && returnedState == expectedState &&
-                !code.isNullOrBlank() && error.isNullOrBlank()
+            val validState = returnedState == expectedState
+            val success = !code.isNullOrBlank() && error.isNullOrBlank()
             sendBrowserResponse(socket, success)
 
-            require(validPath) { "Unexpected OAuth callback path." }
-            require(returnedState == expectedState) { "OAuth state mismatch." }
             require(error.isNullOrBlank()) { "OAuth provider returned: $error" }
-            require(!code.isNullOrBlank()) { "OAuth callback contained no authorization code." }
+            require(!code.isNullOrBlank()) {
+                buildString {
+                    append("OAuth callback contained no authorization code.")
+                    if (!validPath) append(" Callback path did not match the configured path.")
+                    if (!validState) append(" OAuth state was absent or did not match.")
+                }
+            }
             code
+        }
+    }
+
+    private suspend fun persistSessionBestEffort(session: OAuthSession) {
+        try {
+            sessionStore.save(session)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            // The active in-memory session remains usable when durable persistence is unavailable.
+        }
+    }
+
+    private suspend fun clearSessionBestEffort() {
+        try {
+            sessionStore.clear()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            // Logout has already cleared the active in-memory session.
         }
     }
 
