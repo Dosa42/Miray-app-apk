@@ -12,27 +12,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
-import com.example.api.Content
-import com.example.api.GeminiClient
-import com.example.api.GenerateContentRequest
-import com.example.api.Part
 import com.example.ui.MainViewModel
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeworkChatScreen(navController: NavController, viewModel: MainViewModel, sessionId: Int) {
     val messages by viewModel.getHomeworkMessages(sessionId).collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf("") }
-    
-    // Check if we need to send initial greeting
-    LaunchedEffect(messages) {
-        if (messages.isEmpty()) {
-            val initialMsg = "Hi Mirai! I see you have a homework problem. What do you think is the first step?"
-            viewModel.addHomeworkMessage(sessionId, "ai", initialMsg)
-        }
-    }
 
     Scaffold(
         topBar = {
@@ -64,29 +50,6 @@ fun HomeworkChatScreen(navController: NavController, viewModel: MainViewModel, s
                                 val userText = text
                                 text = ""
                                 viewModel.addHomeworkMessage(sessionId, "mirai", userText)
-                                
-                                // Call Gemini API
-                                scope.launch {
-                                    try {
-                                        val history = messages.map {
-                                            Content(role = if (it.sender == "ai") "model" else "user", parts = listOf(Part(text = it.text)))
-                                        } + Content(role = "user", parts = listOf(Part(text = userText)))
-                                        
-                                        val req = GenerateContentRequest(
-                                            contents = history,
-                                            systemInstruction = Content(parts = listOf(Part(text = "You are a friendly hint-only homework tutor for an 8 year old girl named Mirai. Do NOT give her the final answer. Ask guiding questions, point at the relevant rule, and escalate hints gradually. Be encouraging and playful.")))
-                                        )
-                                        
-                                        val resp = GeminiClient.service.generateProContent(
-                                            com.example.BuildConfig.GEMINI_API_KEY, 
-                                            req
-                                        )
-                                        val aiResponse = resp.candidates.firstOrNull()?.content?.parts?.firstOrNull()?.text ?: "Hmm, let's think about this together."
-                                        viewModel.addHomeworkMessage(sessionId, "ai", aiResponse)
-                                    } catch (e: Exception) {
-                                        viewModel.addHomeworkMessage(sessionId, "ai", "Oops, I'm having trouble thinking right now. Could you try again? (${e.message})")
-                                    }
-                                }
                             }
                         }
                     ) {

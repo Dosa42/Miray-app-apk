@@ -39,9 +39,6 @@ class MainActivity : ComponentActivity() {
                         composable("home") {
                             HomeScreen(navController, viewModel)
                         }
-                        composable("word_of_the_day") {
-                            com.example.ui.screens.WordOfTheDayScreen(navController)
-                        }
                         composable("sibling_chat") {
                             SiblingChatScreen(navController, viewModel)
                         }

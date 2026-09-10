@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
-import com.example.BuildConfig
 import com.example.automation.FileSystemEngine
 import com.example.automation.LocalProcessRunner
 import com.example.automation.SystemDiagnostics
@@ -13,10 +12,10 @@ import com.example.db.AppDatabase
 import com.example.db.MemoryContextBuilder
 import com.example.db.MemoryContext
 import com.example.db.MemoryRepository
-import com.example.gemini.CodexAgentService
-import com.example.gemini.CodexExecServerClient
-import com.example.gemini.MultiProviderAIService
-import com.example.gemini.OpenAIOAuthManager
+import com.example.codex.CodexAgentService
+import com.example.codex.CodexExecServerClient
+import com.example.codex.MultiProviderAIService
+import com.example.codex.OpenAIOAuthManager
 import com.example.model.AIProviderConfig
 import com.example.model.AIProviderType
 import com.example.model.ActionStatus
@@ -171,15 +170,6 @@ class TermuxAgentViewModel(application: Application) : AndroidViewModel(applicat
                 )
             }
 
-            // If gemini config has blank key and BuildConfig has a key, pre-fill it
-            val geminiConf = configMap[AIProviderType.GEMINI.id]
-            if (geminiConf != null && geminiConf.apiKey.isBlank() && BuildConfig.GEMINI_API_KEY.isNotBlank() && BuildConfig.GEMINI_API_KEY != "MY_GEMINI_API_KEY") {
-                val updated = geminiConf.copy(apiKey = BuildConfig.GEMINI_API_KEY)
-                configMap[AIProviderType.GEMINI.id] = updated
-                providerConfigDao.insertOrUpdate(updated)
-            }
-
-            // Ensure all 3 are in database
             configMap.values.forEach { config ->
                 providerConfigDao.insertOrUpdate(config)
             }
@@ -590,7 +580,7 @@ print("Python Environment: OK")
                         userMessage = userText,
                         onTextDelta = { delta -> _streamingText.value += delta }
                     ).map { ultra ->
-                        com.example.gemini.AgentResponse(
+                        com.example.codex.AgentResponse(
                             replyText = ultra.text,
                             actions = emptyList(),
                             rawResponse = ultra.rawEvents.joinToString("\n"),

@@ -1,4 +1,4 @@
-package com.example.gemini
+package com.example.codex
 
 import android.content.Context
 import android.content.Intent

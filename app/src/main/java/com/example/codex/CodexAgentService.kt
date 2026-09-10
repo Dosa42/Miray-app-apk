@@ -1,4 +1,4 @@
-package com.example.gemini
+package com.example.codex
 
 import com.example.model.AIProviderConfig
 import com.example.model.ActionType

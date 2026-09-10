@@ -88,7 +88,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.automation.SystemDiagnostics
 import com.example.automation.TermuxBridge
-import com.example.gemini.MultiProviderAIService
+import com.example.codex.MultiProviderAIService
 import com.example.model.AIProviderConfig
 import com.example.model.AIProviderType
 import com.example.model.CodexRuntimeMode
@@ -234,7 +234,6 @@ mkdir -p ~/.termux && if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=
                         providersList.forEach { pType ->
                             val isActive = activeProvider == pType
                             val pColor = when (pType) {
-                                AIProviderType.GEMINI -> TerminalGreen
                                 AIProviderType.OPENAI -> TerminalCyan
                                 AIProviderType.ANTHROPIC -> TerminalPurple
                             }
@@ -263,7 +262,6 @@ mkdir -p ~/.termux && if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=
                                         }
                                         Text(
                                             text = when (pType) {
-                                                AIProviderType.GEMINI -> "Gemini"
                                                 AIProviderType.OPENAI -> "Codex"
                                                 AIProviderType.ANTHROPIC -> "Anthropic"
                                             },
@@ -323,7 +321,6 @@ mkdir -p ~/.termux && if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=
                             TabRowDefaults.SecondaryIndicator(
                                 Modifier.tabIndicatorOffset(tabPositions[selectedProviderTab]),
                                 color = when (currentEditingType) {
-                                    AIProviderType.GEMINI -> TerminalGreen
                                     AIProviderType.OPENAI -> TerminalCyan
                                     AIProviderType.ANTHROPIC -> TerminalPurple
                                 }
@@ -334,7 +331,6 @@ mkdir -p ~/.termux && if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=
                         providersList.forEachIndexed { index, pType ->
                             val isSelected = selectedProviderTab == index
                             val pColor = when (pType) {
-                                AIProviderType.GEMINI -> TerminalGreen
                                 AIProviderType.OPENAI -> TerminalCyan
                                 AIProviderType.ANTHROPIC -> TerminalPurple
                             }
@@ -794,7 +790,6 @@ fun ProviderConfigForm(
     var passwordVisible by remember { mutableStateOf(false) }
 
     val providerColor = when (providerType) {
-        AIProviderType.GEMINI -> TerminalGreen
         AIProviderType.OPENAI -> TerminalCyan
         AIProviderType.ANTHROPIC -> TerminalPurple
     }
@@ -920,11 +915,11 @@ fun ProviderConfigForm(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = if (com.example.gemini.OpenAIOAuthManager.isLoggedIn(apiKey)) "CONNECTED" else "LOGIN REQUIRED",
+                        text = if (com.example.codex.OpenAIOAuthManager.isLoggedIn(apiKey)) "CONNECTED" else "LOGIN REQUIRED",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
                         fontSize = 10.sp,
-                        color = if (com.example.gemini.OpenAIOAuthManager.isLoggedIn(apiKey)) TerminalGreen else TerminalYellow
+                        color = if (com.example.codex.OpenAIOAuthManager.isLoggedIn(apiKey)) TerminalGreen else TerminalYellow
                     )
                 }
                 Text(
@@ -943,7 +938,7 @@ fun ProviderConfigForm(
                         Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            if (com.example.gemini.OpenAIOAuthManager.isLoggedIn(apiKey)) "Renew ChatGPT OAuth Login" else "Login with ChatGPT OAuth",
+                            if (com.example.codex.OpenAIOAuthManager.isLoggedIn(apiKey)) "Renew ChatGPT OAuth Login" else "Login with ChatGPT OAuth",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -964,7 +959,6 @@ fun ProviderConfigForm(
                 )
                 Text(
                     text = when (providerType) {
-                        AIProviderType.GEMINI -> "Gemini API Key"
                         AIProviderType.OPENAI -> "Bearer sk-... / token"
                         AIProviderType.ANTHROPIC -> "x-api-key / Bearer token"
                     },
@@ -982,7 +976,6 @@ fun ProviderConfigForm(
                 placeholder = {
                     Text(
                         when (providerType) {
-                            AIProviderType.GEMINI -> "AIzaSy... (leave blank to use default project key)"
                             AIProviderType.OPENAI -> "sk-... or gateway token"
                             AIProviderType.ANTHROPIC -> "sk-ant-... or gateway token"
                         },

@@ -4,7 +4,6 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 enum class AIProviderType(val id: String, val displayName: String) {
-    GEMINI("GEMINI", "Google Gemini"),
     OPENAI("OPENAI", "Codex OAuth"),
     ANTHROPIC("ANTHROPIC", "Anthropic Claude");
 
@@ -18,7 +17,7 @@ enum class AIProviderType(val id: String, val displayName: String) {
 
 @Entity(tableName = "provider_configs")
 data class AIProviderConfig(
-    @PrimaryKey val providerId: String, // "GEMINI", "OPENAI", "ANTHROPIC"
+    @PrimaryKey val providerId: String, // "OPENAI", "ANTHROPIC"
     val baseUrl: String,
     val apiKey: String,
     val model: String,
